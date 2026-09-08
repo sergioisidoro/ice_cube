@@ -84,6 +84,30 @@ module IceCube
       expect(rule).to eq(IceCube::Rule.weekly(2, :monday))
     end
 
+    it "should be able to parse by_set_pos start (BYSETPOS)" do
+      rule = IceCube::Rule.from_ical("FREQ=MONTHLY;BYDAY=MO,WE;BYSETPOS=-1,1")
+      expect(rule).to eq(IceCube::Rule.monthly.day(:monday, :wednesday).by_set_pos([-1, 1]))
+    end
+
+    it "should preserve by_set_pos in a to_hash/from_hash round trip" do
+      rule = IceCube::Rule.monthly.day(:monday, :wednesday).by_set_pos([-1, 1])
+      expect(IceCube::Rule.from_hash(rule.to_hash)).to eq(rule)
+    end
+
+    it "should raise when by_set_pos is out of range (BYSETPOS)" do
+      expect {
+        IceCube::Rule.from_ical("FREQ=MONTHLY;BYDAY=MO,WE;BYSETPOS=-367")
+      }.to raise_error(/Expecting number in \[-366, -1\] or \[1, 366\]/)
+
+      expect {
+        IceCube::Rule.from_ical("FREQ=MONTHLY;BYDAY=MO,WE;BYSETPOS=367")
+      }.to raise_error(/Expecting number in \[-366, -1\] or \[1, 366\]/)
+
+      expect {
+        IceCube::Rule.from_ical("FREQ=MONTHLY;BYDAY=MO,WE;BYSETPOS=0")
+      }.to raise_error(/Expecting number in \[-366, -1\] or \[1, 366\]/)
+    end
+
     it "should return no occurrences after daily interval with count is over" do
       schedule = IceCube::Schedule.new(Time.now)
       schedule.add_recurrence_rule(IceCube::Rule.from_ical("FREQ=DAILY;COUNT=5"))
@@ -427,6 +451,66 @@ module IceCube
       describe "invalid rule with attempt to execute code" do
         let(:ical_str) { "RRULE:FREQ=to_yaml" }
         it_behaves_like "an invalid ical string"
+      end
+    end
+
+    describe "ical data with wrapping" do
+      it "matches simple daily" do
+        ical_string = "DTSTART:20130314T201500Z\nDTEND:20130314T201545Z\nRRULE:FREQ=WEEKLY;BYDAY=TH;UNT\n  IL=20130531T100000Z\nDESCRIPTION:This is a test event\nSUMMARY:Test Event\n"
+        schedule = IceCube::Schedule.from_ical(ical_string)
+        expect(schedule.to_ical.split("\n").find { |x| x =~ /RRULE/ }).to eq("RRULE:FREQ=WEEKLY;UNTIL=20130531T100000Z;BYDAY=TH")
+      end
+    end
+
+    describe "TZID parameter handling" do
+      it "should read TZID when it is not the first parameter" do
+        schedule = IceCube::Schedule.from_ical "DTSTART;VALUE=DATE-TIME;TZID=America/New_York:20130101T090000"
+        expect(schedule.start_time.utc_offset).to eq(-5 * 3600)
+        expect(schedule.start_time).to eq(Time.utc(2013, 1, 1, 14, 0, 0))
+      end
+
+      it "should read a TZID whose parameter name is lower case" do
+        schedule = IceCube::Schedule.from_ical "DTSTART;tzid=America/New_York:20130101T090000"
+        expect(schedule.start_time).to eq(Time.utc(2013, 1, 1, 14, 0, 0))
+      end
+
+      it "should read a double-quoted TZID" do
+        schedule = IceCube::Schedule.from_ical %(DTSTART;TZID="America/New_York":20130101T090000)
+        expect(schedule.start_time).to eq(Time.utc(2013, 1, 1, 14, 0, 0))
+      end
+
+      it "should not split the value on a colon inside a quoted parameter" do
+        schedule = IceCube::Schedule.from_ical %(DTSTART;TZID="Etc/GMT+5":20130101T090000)
+        expect(schedule.start_time).to eq(Time.utc(2013, 1, 1, 14, 0, 0))
+      end
+
+      it "should ignore a line with no value at all" do
+        expect {
+          IceCube::Schedule.from_ical "BEGIN:VEVENT\nDTSTART;TZID=America/New_York:20130101T090000\nEND"
+        }.not_to raise_error
+      end
+
+      it "should fall back to zone-less parsing and warn for an unknown TZID", expect_warnings: true do
+        schedule = nil
+        warnings = capture_warnings do
+          schedule = IceCube::Schedule.from_ical "DTSTART;TZID=Not/AZone:20130101T090000"
+        end
+        expect(warnings).to match(/unknown TZID "Not\/AZone"/)
+        expect(schedule.start_time).to eq(Time.parse("20130101T090000"))
+      end
+
+      it "should not raise when a time zone database is unavailable" do
+        # ice_cube has no runtime dependency on ActiveSupport or TZInfo, so a
+        # TZID must degrade rather than blow up when neither is loaded.
+        allow(TimeUtil).to receive(:find_zone).and_return(nil)
+        allow(TimeUtil).to receive(:zone_database_available?).and_return(false)
+
+        schedule = nil
+        warnings = capture_warnings do
+          schedule = IceCube::Schedule.from_ical "DTSTART;TZID=America/New_York:20130101T090000"
+        end
+        expect(warnings).to match(/without a time zone database/)
+        expect(schedule.start_time).to eq(Time.parse("20130101T090000"))
       end
     end
   end
