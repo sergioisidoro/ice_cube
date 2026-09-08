@@ -513,5 +513,110 @@ module IceCube
         expect(schedule.start_time).to eq(Time.parse("20130101T090000"))
       end
     end
+
+    describe "default time zone from DTSTART" do
+      it "should exclude a floating EXDATE using DTSTART's zone" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART;TZID=America/New_York:20130101T090000
+          RRULE:FREQ=DAILY
+          EXDATE:20130102T090000
+        ICAL
+        expect(schedule.first(3).map(&:day)).to eq([1, 3, 4])
+      end
+
+      it "should still exclude an EXDATE given in UTC" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART;TZID=America/New_York:20130101T090000
+          RRULE:FREQ=DAILY
+          EXDATE:20130102T140000Z
+        ICAL
+        expect(schedule.first(3).map(&:day)).to eq([1, 3, 4])
+      end
+
+      it "should read a floating RDATE in DTSTART's zone" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART;TZID=America/New_York:20130101T090000
+          RDATE:20130601T090000
+        ICAL
+        expect(schedule.all_occurrences.last).to eq(Time.utc(2013, 6, 1, 13, 0, 0))
+      end
+
+      it "should read a floating UNTIL in DTSTART's zone" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART;TZID=America/New_York:20130101T090000
+          RRULE:FREQ=DAILY;UNTIL=20130105T090000
+        ICAL
+        expect(schedule.last).to eq(Time.utc(2013, 1, 5, 14, 0, 0))
+      end
+
+      it "should apply DTSTART's zone even when DTSTART comes last" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          EXDATE:20130102T090000
+          RRULE:FREQ=DAILY
+          DTSTART;TZID=America/New_York:20130101T090000
+        ICAL
+        expect(schedule.first(3).map(&:day)).to eq([1, 3, 4])
+      end
+
+      it "should leave values alone when DTSTART names no zone" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART:20130101T090000Z
+          RRULE:FREQ=DAILY
+          EXDATE:20130102T090000Z
+        ICAL
+        expect(schedule.first(3).map(&:day)).to eq([1, 3, 4])
+      end
+    end
+
+    describe "case-insensitive names" do
+      it "should parse lower case property and rule part names" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          dtstart;tzid=America/New_York:20130101T090000
+          rrule:freq=daily;count=3
+        ICAL
+        expect(schedule.all_occurrences.map(&:day)).to eq([1, 2, 3])
+        expect(schedule.start_time.utc_offset).to eq(-5 * 3600)
+      end
+
+      it "should parse mixed case names and BYDAY values" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DtStart:20130101T090000Z
+          RRule:Freq=Weekly;Count=2;ByDay=tu
+        ICAL
+        expect(schedule.all_occurrences).to eq([Time.utc(2013, 1, 1, 9), Time.utc(2013, 1, 8, 9)])
+      end
+    end
+
+    describe "DURATION" do
+      it "should set the schedule duration" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART;TZID=America/New_York:20130101T090000
+          DURATION:PT1H30M
+          RRULE:FREQ=DAILY
+        ICAL
+        expect(schedule.duration).to eq(5400)
+      end
+
+      it "should read every duration component" do
+        expect(IcalParser.ical_duration_to_seconds("P1W")).to eq(604800)
+        expect(IcalParser.ical_duration_to_seconds("P1DT2H")).to eq(93600)
+        expect(IcalParser.ical_duration_to_seconds("PT45S")).to eq(45)
+        expect(IcalParser.ical_duration_to_seconds("PT1H30M15S")).to eq(5415)
+      end
+
+      it "should ignore a malformed duration rather than treat it as zero" do
+        expect(IcalParser.ical_duration_to_seconds("garbage")).to be_nil
+        expect(IcalParser.ical_duration_to_seconds("P")).to be_nil
+      end
+
+      it "should let DTEND take precedence over DURATION" do
+        schedule = IceCube::Schedule.from_ical <<~ICAL
+          DTSTART;TZID=America/New_York:20130101T090000
+          DURATION:PT5H
+          DTEND;TZID=America/New_York:20130101T100000
+        ICAL
+        expect(schedule.duration).to eq(3600)
+      end
+    end
   end
 end

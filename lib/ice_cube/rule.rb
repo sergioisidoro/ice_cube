@@ -30,9 +30,11 @@ module IceCube
       raise MethodNotImplemented, "Expected to be overridden by subclasses"
     end
 
-    # Convert from ical string and create a rule
-    def self.from_ical(ical)
-      IceCube::IcalParser.rule_from_ical(ical)
+    # Convert from ical string and create a rule. +default_tzid+ names the zone
+    # an UNTIL value without a zone of its own should be read in, and is
+    # normally the TZID of the enclosing schedule's DTSTART.
+    def self.from_ical(ical, default_tzid = nil)
+      IceCube::IcalParser.rule_from_ical(ical, default_tzid)
     end
 
     # Yaml implementation

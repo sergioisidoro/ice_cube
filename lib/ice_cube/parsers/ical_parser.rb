@@ -2,23 +2,22 @@ module IceCube
   class IcalParser
     def self.schedule_from_ical(ical_string, options = {})
       data = {}
+      lines = unfold_lines(ical_string)
 
-      # First join lines that are wrapped
-      lines = []
-      ical_string.each_line do |line|
-        if lines[-1] && line =~ /\A[ \t].+/
-          lines[-1] = lines[-1].strip + line.sub(/\A[ \t]+/, "")
-        else
-          lines << line
-        end
-      end
+      # DTSTART carries the zone the whole event is expressed in, so a value
+      # elsewhere in the event that names no zone of its own belongs to that
+      # zone rather than to the system zone. Read it up front: DTSTART is not
+      # guaranteed to appear before the properties that depend on it.
+      default_tzid = dtstart_tzid(lines)
 
       lines.each do |line|
         (name_and_params, value) = split_content_line(line)
         next if value.nil?
 
         (property, *params) = split_unquoted(name_and_params, ";")
-        tzid = tzid_from_params(params)
+        # Property and parameter names are case-insensitive (RFC 5545 section 3.1)
+        property = property.strip.upcase
+        tzid = tzid_from_params(params) || default_tzid
 
         case property
         when "DTSTART"
@@ -32,13 +31,58 @@ module IceCube
           data[:extimes] ||= []
           data[:extimes] += value.split(",").map { |v| TimeUtil.deserialize_time_with_zone(v, tzid) }
         when "DURATION"
-          data[:duration] # FIXME
+          data[:duration] = ical_duration_to_seconds(value)
         when "RRULE"
           data[:rrules] ||= []
-          data[:rrules] += [rule_from_ical(value)]
+          data[:rrules] += [rule_from_ical(value, tzid)]
         end
       end
       Schedule.from_hash data
+    end
+
+    # Join lines that are wrapped (RFC 5545 section 3.1 line folding).
+    def self.unfold_lines(ical_string)
+      lines = []
+      ical_string.each_line do |line|
+        if lines[-1] && line =~ /\A[ \t].+/
+          lines[-1] = lines[-1].strip + line.sub(/\A[ \t]+/, "")
+        else
+          lines << line
+        end
+      end
+      lines
+    end
+
+    # The TZID of the event's DTSTART, which acts as the default zone for any
+    # other value that does not name one. Returns nil when DTSTART is absent,
+    # floating, or in UTC, leaving those values to be read as they always were.
+    def self.dtstart_tzid(lines)
+      lines.each do |line|
+        (name_and_params, value) = split_content_line(line)
+        next if value.nil?
+
+        (property, *params) = split_unquoted(name_and_params, ";")
+        next unless property.strip.casecmp("DTSTART").zero?
+
+        return tzid_from_params(params)
+      end
+      nil
+    end
+
+    # Convert an iCalendar duration (RFC 5545 section 3.3.6) to seconds, as
+    # expected by Schedule. Returns nil for a value that cannot be read, so a
+    # malformed DURATION is ignored rather than silently becoming zero.
+    def self.ical_duration_to_seconds(value)
+      match = /\A([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?\z/
+        .match(value.to_s.strip)
+      return nil if match.nil?
+
+      sign, weeks, days, hours, minutes, seconds = match.captures
+      return nil if [weeks, days, hours, minutes, seconds].all?(&:nil?)
+
+      total = weeks.to_i * 604800 + days.to_i * 86400 +
+        hours.to_i * 3600 + minutes.to_i * 60 + seconds.to_i
+      (sign == "-") ? -total : total
     end
 
     # Split a content line into its property part (name and parameters) and its
@@ -85,27 +129,32 @@ module IceCube
       tzid.empty? ? nil : tzid
     end
 
-    def self.rule_from_ical(ical)
+    # +default_tzid+ is the zone of the enclosing schedule's DTSTART, used to
+    # read an UNTIL value that names no zone of its own.
+    def self.rule_from_ical(ical, default_tzid = nil)
       raise ArgumentError, "empty ical rule" if ical.nil?
 
       validations = {}
       params = {validations: validations, interval: 1}
 
       ical.split(";").each do |rule|
-        (name, value) = rule.split("=")
+        (name, value) = rule.split("=", 2)
         raise ArgumentError, "Invalid iCal rule component" if value.nil?
-        value.strip!
+        value = value.strip
+        # Rule part names and their keyword values are case-insensitive
+        name = name.strip.upcase
         case name
         when "FREQ"
+          value = value.upcase
           params[:rule_type] = "IceCube::#{value[0]}#{value.downcase[1..]}Rule"
         when "INTERVAL"
           params[:interval] = value.to_i
         when "COUNT"
           params[:count] = value.to_i
         when "UNTIL"
-          params[:until] = TimeUtil.deserialize_time(value).utc
+          params[:until] = TimeUtil.deserialize_time_with_zone(value, default_tzid).utc
         when "WKST"
-          params[:week_start] = TimeUtil.ical_day_to_symbol(value)
+          params[:week_start] = TimeUtil.ical_day_to_symbol(value.upcase)
         when "BYSECOND"
           validations[:second_of_minute] = value.split(",").map(&:to_i)
         when "BYMINUTE"
@@ -116,8 +165,9 @@ module IceCube
           dows = {}
           days = []
           value.split(",").each do |expr|
-            day = TimeUtil.ical_day_to_symbol(expr.strip[-2..])
-            if expr.strip.length > 2 # day with occurence
+            expr = expr.strip.upcase
+            day = TimeUtil.ical_day_to_symbol(expr[-2..])
+            if expr.length > 2 # day with occurence
               occ = expr[0..-3].to_i
               dows[day].nil? ? dows[day] = [occ] : dows[day].push(occ)
               days.delete(TimeUtil.sym_to_wday(day))
